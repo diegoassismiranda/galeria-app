@@ -6,19 +6,22 @@ import Toast from '../components/Toast'
 import Slideshow from '../components/Slideshow'
 
 export default function AlbumPage() {
-  const { id } = useParams()
-  const { user } = useAuth()
-  const navigate = useNavigate()
+  const { id }     = useParams()
+  const { user }   = useAuth()
+  const navigate   = useNavigate()
 
-  const [album, setAlbum]           = useState(null)
-  const [photos, setPhotos]         = useState([])
-  const [loading, setLoading]       = useState(true)
-  const [uploading, setUploading]   = useState(false)
+  const [album, setAlbum]         = useState(null)
+  const [photos, setPhotos]       = useState([])
+  const [loading, setLoading]     = useState(true)
+  const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
-  const [dragOver, setDragOver]     = useState(false)
-  const [slideshow, setSlideshow]   = useState(false)
-  const [toast, setToast]           = useState(null)
-  const fileInputRef = useRef()
+  const [dragOver, setDragOver]   = useState(false)
+  const [slideshow, setSlideshow] = useState(false)
+  const [toast, setToast]         = useState(null)
+
+  const fileInputRef  = useRef()
+  const dragItem      = useRef(null)
+  const dragOverItem  = useRef(null)
 
   useEffect(() => { loadData() }, [id])
 
@@ -26,7 +29,7 @@ export default function AlbumPage() {
     setLoading(true)
     const [{ data: albumData }, { data: photoData }] = await Promise.all([
       supabase.from('albums').select('*').eq('id', id).eq('user_id', user.id).single(),
-      supabase.from('photos').select('*').eq('album_id', id).order('created_at', { ascending: true })
+      supabase.from('photos').select('*').eq('album_id', id).order('position', { ascending: true }).order('created_at', { ascending: true })
     ])
     if (!albumData) { navigate('/'); return }
     setAlbum(albumData)
@@ -42,6 +45,7 @@ export default function AlbumPage() {
     setUploadProgress(0)
     let done = 0
     const newPhotos = []
+    const startPos  = photos.length
 
     for (const file of imageFiles) {
       const ext      = file.name.split('.').pop()
@@ -58,7 +62,7 @@ export default function AlbumPage() {
 
       const { data: photoRow } = await supabase
         .from('photos')
-        .insert({ album_id: id, user_id: user.id, url: publicUrl, filename, size: file.size })
+        .insert({ album_id: id, user_id: user.id, url: publicUrl, filename, size: file.size, position: startPos + done })
         .select()
         .single()
 
@@ -67,7 +71,6 @@ export default function AlbumPage() {
       setUploadProgress(Math.round((done / imageFiles.length) * 100))
     }
 
-    // Set album cover if it's the first upload
     if (!album.cover_url && newPhotos.length) {
       await supabase.from('albums').update({ cover_url: newPhotos[0].url }).eq('id', id)
       setAlbum(prev => ({ ...prev, cover_url: newPhotos[0].url }))
@@ -86,7 +89,6 @@ export default function AlbumPage() {
     await supabase.from('photos').delete().eq('id', photo.id)
     const remaining = photos.filter(p => p.id !== photo.id)
     setPhotos(remaining)
-    // Update cover if needed
     if (album.cover_url === photo.url) {
       const newCover = remaining[0]?.url || null
       await supabase.from('albums').update({ cover_url: newCover }).eq('id', id)
@@ -95,16 +97,56 @@ export default function AlbumPage() {
     showToast('Foto apagada.')
   }
 
-  function showToast(msg, type = 'success') {
-    setToast({ msg, type })
-    setTimeout(() => setToast(null), 3000)
+  // ── Caption ──────────────────────────────────────
+  async function saveCaption(photo, caption) {
+    await supabase.from('photos').update({ caption }).eq('id', photo.id)
+    setPhotos(prev => prev.map(p => p.id === photo.id ? { ...p, caption } : p))
   }
 
-  const onDrop = useCallback(e => {
+  // ── Drag to reorder ───────────────────────────────
+  function onDragStart(e, index) {
+    dragItem.current = index
+    e.dataTransfer.effectAllowed = 'move'
+  }
+
+  function onDragEnter(e, index) {
+    e.preventDefault()
+    dragOverItem.current = index
+    setPhotos(prev => {
+      if (dragItem.current === null || dragItem.current === index) return prev
+      const arr   = [...prev]
+      const moved = arr.splice(dragItem.current, 1)[0]
+      arr.splice(index, 0, moved)
+      dragItem.current = index
+      return arr
+    })
+  }
+
+  function onDragEnd() {
+    dragItem.current     = null
+    dragOverItem.current = null
+    // Save new order to DB
+    saveOrder()
+  }
+
+  async function saveOrder() {
+    const updates = photos.map((p, i) =>
+      supabase.from('photos').update({ position: i }).eq('id', p.id)
+    )
+    await Promise.all(updates)
+  }
+
+  // ── Upload drag ───────────────────────────────────
+  const onDropUpload = useCallback(e => {
     e.preventDefault()
     setDragOver(false)
     handleFiles(e.dataTransfer.files)
   }, [id, album])
+
+  function showToast(msg, type = 'success') {
+    setToast({ msg, type })
+    setTimeout(() => setToast(null), 3000)
+  }
 
   if (loading) return <div className="loading-screen"><div className="spinner" /></div>
 
@@ -144,7 +186,7 @@ export default function AlbumPage() {
           className={`upload-zone ${dragOver ? 'drag-over' : ''}`}
           onDragOver={e => { e.preventDefault(); setDragOver(true) }}
           onDragLeave={() => setDragOver(false)}
-          onDrop={onDrop}
+          onDrop={onDropUpload}
           onClick={() => !uploading && fileInputRef.current.click()}
         >
           <div className="upload-zone-icon">📸</div>
@@ -179,22 +221,26 @@ export default function AlbumPage() {
             <div className="empty-state-sub">Faça upload das suas primeiras fotos acima.</div>
           </div>
         ) : (
-          <div className="photos-grid">
-            {photos.map((photo, i) => (
-              <div
-                key={photo.id}
-                className="photo-card"
-                style={{ animationDelay: `${i * 0.03}s` }}
-              >
-                <img src={photo.url} alt="" loading="lazy" />
-                <div className="photo-overlay">
-                  <button className="photo-delete-btn" onClick={() => deletePhoto(photo)}>
-                    Apagar
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
+          <>
+            <div className="drag-hint">
+              <span>⠿</span> Arraste as fotos para reordenar • Passe o mouse para editar legenda ou apagar
+            </div>
+            <div className="photos-grid">
+              {photos.map((photo, i) => (
+                <PhotoCard
+                  key={photo.id}
+                  photo={photo}
+                  index={i}
+                  onDragStart={onDragStart}
+                  onDragEnter={onDragEnter}
+                  onDragEnd={onDragEnd}
+                  onDelete={() => deletePhoto(photo)}
+                  onSaveCaption={(caption) => saveCaption(photo, caption)}
+                  style={{ animationDelay: `${Math.min(i * 0.025, 0.4)}s` }}
+                />
+              ))}
+            </div>
+          </>
         )}
       </main>
 
@@ -203,6 +249,38 @@ export default function AlbumPage() {
       )}
 
       {toast && <Toast msg={toast.msg} type={toast.type} />}
+    </div>
+  )
+}
+
+function PhotoCard({ photo, index, onDragStart, onDragEnter, onDragEnd, onDelete, onSaveCaption, style }) {
+  const [caption, setCaption] = useState(photo.caption || '')
+
+  return (
+    <div
+      className="photo-card"
+      style={style}
+      draggable
+      onDragStart={e => onDragStart(e, index)}
+      onDragEnter={e => onDragEnter(e, index)}
+      onDragEnd={onDragEnd}
+      onDragOver={e => e.preventDefault()}
+    >
+      <img src={photo.url} alt={caption} loading="lazy" />
+      <div className="photo-overlay">
+        <input
+          className="photo-caption-input"
+          placeholder="Adicionar legenda…"
+          value={caption}
+          onChange={e => setCaption(e.target.value)}
+          onBlur={() => onSaveCaption(caption)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.target.blur() } }}
+          onClick={e => e.stopPropagation()}
+        />
+        <button className="photo-delete-btn" onClick={e => { e.stopPropagation(); onDelete() }}>
+          Apagar foto
+        </button>
+      </div>
     </div>
   )
 }
